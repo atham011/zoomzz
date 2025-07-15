@@ -8,6 +8,8 @@ import os
 import sys
 from tqdm import tqdm
 import torchvision.transforms as T
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from dataset import handsssDataset, collate_fn
@@ -23,10 +25,10 @@ def train(data_path, ann_path):
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn()
     print("Loaded model...")
 
-    num_classes = 4
+    num_classes = 5
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    device = torch.device('cpu')  #chnage to cuda if you have it 
+    device = torch.device('cpu') 
 
     print("Initializing Dataset...")
     transform = T.Compose([T.ToTensor()])

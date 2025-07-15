@@ -7,70 +7,107 @@ from pycocotools.cocoeval import COCOeval
 import json
 import os
 from tqdm import tqdm
-from dataset import handsssDataset, collate_fn  # your existing dataset
+from dataset import handsssDataset, collate_fn
+import os
+from torchvision import transforms as T
 
-# ---- Config ----
+
 MODEL_PATH = './models/fasterrcnn_hands.pth'
 DATA_PATH = '/Users/arya/Downloads/hands_dataset/test'
 ANN_PATH = '/Users/arya/Downloads/hands_dataset/test/_annotations.coco.json'
-NUM_CLASSES = 4  # including background as class 0 if you used that setup
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+NUM_CLASSES = 5
+DEVICE = torch.device('cpu')
 SAVE_PRED_JSON = './predictions.json'
+SAVE_GT = './groundtruth.json'
 
-# ---- Load model ----
-def get_model(num_classes):
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    return model
 
-model = get_model(NUM_CLASSES)
-model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+
+model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False, num_classes=5)
+model.load_state_dict(torch.load(MODEL_PATH))
 model.to(DEVICE)
 model.eval()
 
-# ---- Load dataset ----
-from torchvision import transforms as T
 transform = T.Compose([T.ToTensor()])
-dataset = handsssDataset(DATA_PATH, ANN_PATH, transform=transform)
-dataloader = DataLoader(dataset, batch_size=1, collate_fn=collate_fn)
+data = handsssDataset(DATA_PATH, ANN_PATH, transform=transform)
+dataloader = DataLoader(data, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
-# ---- Run inference and collect predictions in COCO format ----
+
+# Generate predictions
 results = []
-print("Running inference on test set...")
-for images, targets in tqdm(dataloader):
+for image_id, (images, targets) in enumerate(tqdm(dataloader)):
     images = [img.to(DEVICE) for img in images]
-    with torch.no_grad():
-        outputs = model(images)
+    outputs = model(images)
 
-    for target, output in zip(targets, outputs):
-        image_id = int(target["image_id"].item())
-        boxes = output['boxes'].cpu().numpy()
-        scores = output['scores'].cpu().numpy()
-        labels = output['labels'].cpu().numpy()
+    for i in range(len(images)):
+        boxes = outputs[i]['boxes'].detach().cpu().numpy()
+        scores = outputs[i]['scores'].detach().cpu().numpy()
+        labels = outputs[i]['labels'].detach().cpu().numpy()
 
         for box, score, label in zip(boxes, scores, labels):
-            x_min, y_min, x_max, y_max = box
-            bbox = [float(x_min), float(y_min), float(x_max - x_min), float(y_max - y_min)]
+            if score < 0.3:
+                continue
+            x1, y1, x2, y2 = box
             results.append({
-                "image_id": int(image_id),
+                "image_id": image_id,
                 "category_id": int(label),
-                "bbox": bbox,
+                "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
                 "score": float(score)
             })
 
-
-# ---- Save predictions to JSON ----
-with open(SAVE_PRED_JSON, 'w') as f:
+# Save predictions to JSON
+with open(SAVE_PRED_JSON, "w") as f:
     json.dump(results, f)
 
-print(f"Saved predictions to {SAVE_PRED_JSON}")
+# Build ground truth in COCO format
+def build_coco_gt(dataset, save_path):
+    coco_gt = {
+        "images": [],
+        "annotations": [],
+        "categories": []
+    }
+    
+    ann_id = 1
+    for image_id in range(len(dataset)):
+        image, target = dataset[image_id]
+        coco_gt["images"].append({
+            "id": image_id,
+            "width": image.shape[2],
+            "height": image.shape[1],
+            "file_name": f"{image_id}.jpg"
+        })
 
-# ---- COCO Evaluation ----
-coco_gt = COCO(ANN_PATH)
+        for j in range(len(target["boxes"])):
+            box = target["boxes"][j]
+            x1, y1, x2, y2 = box.tolist()
+            coco_gt["annotations"].append({
+                "id": ann_id,
+                "image_id": image_id,
+                "category_id": int(target["labels"][j].item()),
+                "bbox": [x1, y1, x2 - x1, y2 - y1],
+                "area": (x2 - x1) * (y2 - y1),
+                "iscrowd": 0
+            })
+            ann_id += 1
+
+    # Use label2index from dataset or fallback to default if missing
+    if hasattr(dataset, 'label2index'):
+        categories = [{"id": idx, "name": name} for name, idx in dataset.label2index.items()]
+    else:
+        categories = [{"id": i, "name": f"class_{i}"} for i in range(1, NUM_CLASSES)]
+    
+    coco_gt["categories"] = categories
+
+    with open(save_path, "w") as f:
+        json.dump(coco_gt, f)
+
+# Save GT file
+build_coco_gt(dataset, SAVE_GT)
+
+# Run COCO Evaluation
+coco_gt = COCO(SAVE_GT)
 coco_dt = coco_gt.loadRes(SAVE_PRED_JSON)
 
-coco_eval = COCOeval(coco_gt, coco_dt, iouType='bbox')
+coco_eval = COCOeval(coco_gt, coco_dt, "bbox")
 coco_eval.evaluate()
 coco_eval.accumulate()
 coco_eval.summarize()
